@@ -1,0 +1,157 @@
+/*
+ * ============================================================
+ *  3-Sensor Line Follower Robot (EDVON kit, Arduino)
+ * ============================================================
+ *  Author : Hamza Khan
+ *
+ *  The robot reads three analog IR sensors (left, centre, right),
+ *  decides where the black line is, and steers the two DC motors
+ *  to stay on it. If the line is lost, it spins in the direction
+ *  it last saw the line and stops after a timeout.
+ *
+ *  Pin map
+ *  -------
+ *  LEFT  motor  -> D2 (dir1)  D3 (PWM)  D4 (dir2)
+ *  RIGHT motor  -> D5 (dir1)  D6 (PWM)  D7 (dir2)
+ *
+ *  LEFT   IR    -> IR-L header (A4)
+ *  CENTER IR    -> IR-M header (A3)
+ *  RIGHT  IR    -> IR-R header (A2)
+ *
+ *  Note: the IR sensors are read with analogRead(), not digitalRead().
+ *  The threshold (525) comes from the official EDVON example code.
+ * ============================================================
+ */
+
+// ── Motor Pins ───────────────────────────────────────────────
+#define LEFT_DIR1   2
+#define LEFT_PWM    3
+#define LEFT_DIR2   4
+#define RIGHT_DIR1  5
+#define RIGHT_PWM   6
+#define RIGHT_DIR2  7
+
+// ── IR Sensor Pins ───────────────────────────────────────────
+#define SENSOR_LEFT    A4
+#define SENSOR_CENTER  A3
+#define SENSOR_RIGHT   A2
+
+// ── Sensor threshold (from official EDVON code) ──────────────
+// analogRead > 525 means WHITE (no line)
+// analogRead < 525 means BLACK (line detected)
+#define IR_THRESHOLD  525
+
+// ── Speed Settings (0-255 PWM) ───────────────────────────────
+const uint8_t SPD_FWD    = 180;  // normal forward speed
+const uint8_t SPD_FAST   = 220;  // outer wheel in sharp turns
+const uint8_t SPD_SLOW   =  80;  // inner wheel in gentle turns
+const uint8_t SPD_SEARCH = 150;  // spin speed when line is lost
+
+// Stop the robot if the line is not found within this time (ms)
+const uint32_t SEARCH_TIMEOUT = 2000;
+
+// ── State ────────────────────────────────────────────────────
+int8_t   lastDir  = 0;      // -1 = line was last on left, 1 = right, 0 = centre
+uint32_t lostTime = 0;      // when the line was first lost
+bool     lost     = false;  // true while searching for the line
+
+// ============================================================
+//  SENSOR READING
+// ============================================================
+
+// Returns true if the sensor sees the BLACK line
+bool seeBlack(uint8_t pin) {
+  return analogRead(pin) < IR_THRESHOLD;
+}
+
+// ============================================================
+//  MOTOR CONTROL
+// ============================================================
+
+void stopMotors() {
+  digitalWrite(LEFT_DIR1,  LOW); analogWrite(LEFT_PWM,  0); digitalWrite(LEFT_DIR2,  LOW);
+  digitalWrite(RIGHT_DIR1, LOW); analogWrite(RIGHT_PWM, 0); digitalWrite(RIGHT_DIR2, LOW);
+}
+
+void leftFwd(uint8_t spd)  { digitalWrite(LEFT_DIR1,  HIGH); analogWrite(LEFT_PWM,  spd); digitalWrite(LEFT_DIR2,  LOW);  }
+void leftRev(uint8_t spd)  { digitalWrite(LEFT_DIR1,  LOW);  analogWrite(LEFT_PWM,  spd); digitalWrite(LEFT_DIR2,  HIGH); }
+void leftOff()             { digitalWrite(LEFT_DIR1,  LOW);  analogWrite(LEFT_PWM,  0);   digitalWrite(LEFT_DIR2,  LOW);  }
+void rightFwd(uint8_t spd) { digitalWrite(RIGHT_DIR1, HIGH); analogWrite(RIGHT_PWM, spd); digitalWrite(RIGHT_DIR2, LOW);  }
+void rightRev(uint8_t spd) { digitalWrite(RIGHT_DIR1, LOW);  analogWrite(RIGHT_PWM, spd); digitalWrite(RIGHT_DIR2, HIGH); }
+void rightOff()            { digitalWrite(RIGHT_DIR1, LOW);  analogWrite(RIGHT_PWM, 0);   digitalWrite(RIGHT_DIR2, LOW);  }
+
+// ============================================================
+//  MOVEMENTS
+// ============================================================
+
+void goForward()   { leftFwd(SPD_FWD);  rightFwd(SPD_FWD);  }
+void gentleLeft()  { leftFwd(SPD_SLOW); rightFwd(SPD_FWD);  }
+void gentleRight() { leftFwd(SPD_FWD);  rightFwd(SPD_SLOW); }
+void sharpLeft()   { leftOff();         rightFwd(SPD_FAST); }
+void sharpRight()  { leftFwd(SPD_FAST); rightOff();         }
+void searchLeft()  { leftRev(SPD_SEARCH); rightFwd(SPD_SEARCH); }
+void searchRight() { leftFwd(SPD_SEARCH); rightRev(SPD_SEARCH); }
+
+// ============================================================
+//  LINE FOLLOW LOGIC
+// ============================================================
+
+void followLine() {
+  bool L = seeBlack(SENSOR_LEFT);
+  bool C = seeBlack(SENSOR_CENTER);
+  bool R = seeBlack(SENSOR_RIGHT);
+
+  // All on — crossing, go straight
+  if (L && C && R)   { goForward();   lastDir =  0; lost = false; return; }
+
+  // Centre only — on line, go straight
+  if (C && !L && !R) { goForward();   lastDir =  0; lost = false; return; }
+
+  // Centre + Left — correct left gently
+  if (C && L && !R)  { gentleLeft();  lastDir = -1; lost = false; return; }
+
+  // Centre + Right — correct right gently
+  if (C && R && !L)  { gentleRight(); lastDir =  1; lost = false; return; }
+
+  // Left only — sharp left corner
+  if (L && !C && !R) { sharpLeft();   lastDir = -1; lost = false; return; }
+
+  // Right only — sharp right corner
+  if (R && !C && !L) { sharpRight();  lastDir =  1; lost = false; return; }
+
+  // Left + Right, no centre — straddling the line, go straight
+  if (L && R && !C)  { goForward();   lost = false; return; }
+
+  // Nothing seen — line lost, start searching
+  if (!lost) { lostTime = millis(); lost = true; }
+
+  // Give up after the timeout
+  if (millis() - lostTime > SEARCH_TIMEOUT) { stopMotors(); return; }
+
+  // Spin toward the side where the line was last seen
+  if (lastDir <= 0) searchLeft(); else searchRight();
+}
+
+// ============================================================
+//  SETUP & LOOP
+// ============================================================
+
+void setup() {
+  pinMode(LEFT_DIR1,  OUTPUT);
+  pinMode(LEFT_PWM,   OUTPUT);
+  pinMode(LEFT_DIR2,  OUTPUT);
+  pinMode(RIGHT_DIR1, OUTPUT);
+  pinMode(RIGHT_PWM,  OUTPUT);
+  pinMode(RIGHT_DIR2, OUTPUT);
+
+  pinMode(SENSOR_LEFT,   INPUT);
+  pinMode(SENSOR_CENTER, INPUT);
+  pinMode(SENSOR_RIGHT,  INPUT);
+
+  stopMotors();
+  delay(2000);  // 2 s to place the robot on the track before it moves
+}
+
+void loop() {
+  followLine();
+}
